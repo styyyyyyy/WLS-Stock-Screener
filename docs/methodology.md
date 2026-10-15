@@ -67,6 +67,9 @@ for 6–10, `0.50` for 11–15, and zero otherwise. An already past report date
 gets zero. The weekday count does not separately model each exchange holiday.
 The 0–5 score is proximity only; it does not predict a positive earnings
 surprise. Bloomberg *expected* report dates need event-specific verification.
+The 3-month return starts at the last available close on or before the signal
+date minus three calendar months; the later decision date does not shift this
+lookback window.
 
 Screen A ties break by score, 3-month percentile, EPS percentile, traded value,
 then ticker. Screen B ties break by score, catalyst, volatility percentile,

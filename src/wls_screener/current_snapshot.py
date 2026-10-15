@@ -176,6 +176,19 @@ def sector_percentile(series: pd.Series) -> pd.Series:
     return result
 
 
+def _three_month_return(
+    prices: np.ndarray, trade_dates: list[date], signal_date: date,
+) -> float:
+    """Compare the signal close with the last close on or before its 3M anchor."""
+    cutoff = signal_date - relativedelta(months=3)
+    lookback = [i for i, day in enumerate(trade_dates) if day <= cutoff]
+    if not lookback:
+        return math.nan
+    baseline = float(prices[lookback[-1]])
+    latest = float(prices[-1])
+    return latest / baseline - 1 if valid_positive(latest) and valid_positive(baseline) else math.nan
+
+
 def _write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         raise ValueError(f"Refusing to write an empty CSV: {path}")
@@ -293,7 +306,6 @@ def replay(
     baseline_date = max(day for day in eps_dates if day <= eps_date - timedelta(days=30))
     eps_index = eps_dates.index(eps_date)
     baseline_index = eps_dates.index(baseline_date)
-    three_month_start = decision_date - relativedelta(months=3)
     filter_rows = []
     scored_rows = []
     for ticker, row in current.items():
@@ -348,9 +360,7 @@ def replay(
             continue
         px_array = np.asarray(px)
         last = px_array[-1]
-        lookback = [i for i, day in enumerate(days) if day <= three_month_start]
-        old_price = px_array[lookback[-1]] if lookback else math.nan
-        return3m = last / old_price - 1 if valid_positive(old_price) else math.nan
+        return3m = _three_month_return(px_array, days, signal_date)
         return5d = last / px_array[-6] - 1 if len(px_array) >= 6 else math.nan
         ma20 = float(px_array[-20:].mean()) if len(px_array) >= 20 else math.nan
         ma50 = float(px_array[-50:].mean()) if len(px_array) >= 50 else math.nan

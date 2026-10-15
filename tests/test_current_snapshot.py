@@ -1,14 +1,17 @@
 """Portable checks for the five-workbook replay's easy-to-misread inputs."""
 
+import math
 import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
 
+import numpy as np
 from openpyxl import Workbook
 
 from wls_screener.current_snapshot import (
     _recent_business_days,
+    _three_month_return,
     current_key_map,
     date_value,
     infer_closed_exchanges,
@@ -60,6 +63,20 @@ class CurrentSnapshotTests(unittest.TestCase):
         self.assertEqual(date_value(20261021), date(2026, 10, 21))
         self.assertEqual(date_value(datetime(2026, 10, 21, 14, 0)), date(2026, 10, 21))
         self.assertIsNone(date_value("--"))
+
+    def test_three_month_return_anchors_to_signal_close(self) -> None:
+        # The next-day decision is October 15, but the completed signal close
+        # is October 14. July 14 and July 15 deliberately have different prices.
+        trade_dates = [date(2026, 7, 14), date(2026, 7, 15), date(2026, 10, 14)]
+        self.assertAlmostEqual(
+            _three_month_return(
+                np.array([80.0, 100.0, 120.0]), trade_dates, date(2026, 10, 14),
+            ),
+            0.5,
+        )
+        self.assertTrue(math.isnan(_three_month_return(
+            np.array([100.0, 120.0]), trade_dates[1:], date(2026, 10, 14),
+        )))
 
     def test_worksheet_header_newlines_and_missing_fields(self) -> None:
         workbook = Workbook()
