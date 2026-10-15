@@ -16,7 +16,7 @@ decision time:
 | 20-day average daily value traded | `> 15,000,000` USD |
 | Current market capitalization | `> 500,000,000` USD |
 
-Missing or nonnumeric values fail the relevant test. A usable GICS sector and
+Missing or nonnumeric values fail the relevant test. A usable GICS (Global Industry Classification Standard) sector and
 factor history are also needed for a rank. In the October 14 supplied snapshot,
 10,417 WLS rows became 4,965 scored names. This count describes that dated
 export; it is not a permanent universe size. The export's field
