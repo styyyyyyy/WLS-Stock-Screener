@@ -1,315 +1,173 @@
 # WLS Stock Screener
 
-A small, reproducible Python project for ranking stocks in a one-month trading competition.
+Reproducible Screen A and Screen B rankings for a daily-rebalanced, five-stock
+portfolio. The current method starts with the Bloomberg World Large, Mid &
+Small Cap **Price Return** Index (WLS) universe, applies an investability
+filter, ranks the survivors within their sectors, and selects three Screen A
+stocks plus two distinct Screen B stocks. Each target position is 20% of
+portfolio value. WLS index constituent weights are used only for an index
+reference, never as strategy weights.
 
-The project creates two lists:
+## The 10,000-to-5,000 first layer
 
-- **Screen A:** core momentum stocks with improving earnings expectations and price confirmation.
-- **Screen B:** high-upside stocks with a near earnings event, high volatility, and positive short-term confirmation.
+Apply these **strict** gates to every WLS constituent before calculating any
+sector percentile or score:
 
-The code was written for a Bloomberg workbook with three sheets:
+| Bloomberg field | Required value |
+| --- | ---: |
+| `Price 1 Day ago [USD]` | `> 1` USD |
+| `Average Daily Value Traded` (20-day average) | `> 15,000,000` USD |
+| `Current Market Cap [USD]` | `> 500,000,000` USD |
 
-- `Main`
-- `Prices`
-- `Turnover`
+Missing values fail. The number surviving varies by date; “5,000” is an
+approximation. The supplied October 14 export has 10,417 WLS rows and 4,965
+names with usable sector/history after the gates. Its average daily traded
+value field is lagged (`Avg D Val Traded 20D:D-20`), so that day's replay is
+an estimate of a current liquidity screen.
 
-It produces full rankings, Top-N lists, an Excel report, CSV files, and a JSON run record.
+**Data timing matters:** for a completed-close decision, the price gate must
+use the prior completed local-session USD close. A mixed-time intraday `Price`
+field must not replace it. The conventional `Main` workbook labels its field
+`PriceUSD`; supply the prior completed close there for parity with Bloomberg.
+The traded-value and market-cap inputs must also be USD values known at the
+decision time.
 
-## 1. Project structure
+## Scores and portfolio
+
+Within the filtered universe, `PR(x)` is the midpoint percentile of factor
+`x` within the stock's GICS sector. Missing numeric factors get a neutral
+`0.5`; missing filter fields fail the first layer.
 
 ```text
-wls-stock-screener/
-├── README.md
-├── pyproject.toml
-├── requirements.txt
-├── run_screener.py
-├── src/
-│   └── wls_screener/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── config.py
-│       ├── data.py
-│       ├── export.py
-│       ├── features.py
-│       ├── pipeline.py
-│       └── ranking.py
-└── tests/
-    └── test_core.py
+EPSRevision = (FY1_now - FY1_30_days_earlier)
+              / (abs(FY1_now) + abs(FY1_30_days_earlier) + 1e-12)
+VolumeRatio = average share volume over 5 sessions / average over 20 sessions
+PriceConfirmation = 0.40×PR(price/MA20−1)
+                  + 0.30×PR(price/MA50−1)
+                  + 0.30×PR(VolumeRatio)
+
+ScreenA = 0.40×PR(3-month return) + 0.25×PR(EPSRevision)
+        + 0.25×PriceConfirmation + 0.10×PR(5-session return)
+
+ScreenB = 0.35×EarningsCatalyst + 0.30×PR(20-session volatility)
+        + 0.20×PR(5-session return) + 0.15×PR(VolumeRatio)
 ```
 
-## 2. Installation
+The earnings catalyst is 1.00 when the next report is due in 0–5 weekdays,
+0.75 for 6–10, 0.50 for 11–15, and zero otherwise. Each screen exports its
+Top 20. The portfolio takes A ranks 1–3, then the two highest B names that
+are not already selected for A. Positions remain open overnight; a daily
+rebalance sells or resizes them at the next modeled execution price. A closed
+local market cannot receive a fictional fill.
 
-### Simple setup
+See [full methodology](docs/methodology.md) for factor definitions,
+tie-breakers, data timing, and limitations.
+
+## Install
+
+Python 3.10 or newer is required.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate      # macOS / Linux
-# .venv\Scripts\activate       # Windows
-
-pip install -r requirements.txt
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-### Install as a package
+## Run with a normalized `Main` / `Prices` / `Turnover` workbook
 
-```bash
-pip install -e .
-```
-
-After package installation, the command `wls-screener` is available.
-
-## 3. Run the model
-
-### Run directly from the repository
+Use this interface when all WLS candidate stocks, including names that may
+fail the first-layer gates, are already in the three-sheet format. `Main`
+columns A:T are, in order: ticker, name, USD prior-close price, 20-day USD
+average daily value traded, USD market cap, local market cap, local price,
+P/E, unused, GICS sector, next earnings date, 20-day volatility, 5-day
+average share volume, 20-day average share volume, country, 5-day return,
+3-month return, current FY1 EPS estimate, 30-day-old FY1 EPS estimate, and
+an unused EPS-change field. `Prices` and `Turnover` contain ticker followed
+by dated daily observations. The `Prices` sheet needs at least 50 completed
+observations for the moving averages.
 
 ```bash
 python run_screener.py \
-  --input "WLS FIlter index2.xlsx" \
-  --output-dir outputs \
-  --as-of-date 2026-10-05
+  --input /path/to/wls_main_prices_turnover.xlsx \
+  --as-of-date 2026-10-13 \
+  --output-dir outputs/screening
 ```
 
-### Run after package installation
+This exports the gate audit and counts, both full rankings and Top 20 lists,
+five equal-weight target positions, an Excel report, and run metadata. It
+uses the supplied `Main` fields as dated inputs; it does not reconstruct
+missing daily market-cap or traded-value history. The older roughly 5,000-row
+workbook is already a filtered subset and cannot demonstrate the full
+10,000-to-5,000 reduction by itself.
+
+## Replay the supplied October 14 raw WLS export
+
+The newer `Worksheet`/dated-panel files have a different layout. This
+entry point joins the raw approximately 10,000-stock snapshot to the older
+price and comparable FY1 EPS/share-volume history, applies the first-layer
+filter, and exports the Screen A/B Top 20 and A3/B2 target. The five local
+workbooks are inputs only; they are not included in this repository.
 
 ```bash
-wls-screener \
-  --input "WLS FIlter index2.xlsx" \
-  --output-dir outputs \
-  --as-of-date 2026-10-05 \
-  --top-n 20
+python run_current_snapshot.py \
+  --historical-prices /path/to/WLS_as_of_Oct_08_and_Prices_100d.xlsx \
+  --eps-volume /path/to/EPS_and_Turnover.xlsx \
+  --sector-snapshot /path/to/WLS_as_of_Oct_10.xlsx \
+  --interim-snapshot /path/to/20261013_Data.xlsx \
+  --current-snapshot /path/to/20261014_Data_USD.xlsx \
+  --signal-date 2026-10-13 \
+  --decision-date 2026-10-14 \
+  --output-dir outputs/oct14_replay
 ```
 
-Passing `--as-of-date` is strongly recommended because Screen B depends on the number of business days to the next earnings date. If it is omitted, the program uses the workbook's modified date.
-
-## 4. Expected input workbook
-
-### `Main` sheet
-
-The first 20 columns, A:T, are expected to contain the following data in this order:
-
-1. Ticker
-2. Company name
-3. USD or common-currency price
-4. 20-day average daily value traded
-5. USD or common-currency market capitalization
-6. Local market capitalization
-7. Local price
-8. P/E
-9. Unused column
-10. Sector
-11. Next earnings date
-12. 20-day volatility
-13. 5-day average volume
-14. 20-day average volume
-15. Country
-16. 5-day return
-17. 3-month return
-18. Current FY1 EPS consensus
-19. FY1 EPS consensus 30 days ago
-20. Existing EPS-change field, which is not used by the model
-
-### `Prices` sheet
-
-```text
-Ticker | t-0 | t-1 | t-2 | ...
-```
-
-`t-0` is the latest price. The model requires 20 complete observations for MA20 and 50 complete observations for MA50.
-
-### `Turnover` sheet
-
-```text
-Ticker | t-0 | t-1 | t-2 | ...
-```
-
-Turnover is used only as a diagnostic. It is not included in either score because it is usually very similar to the volume-ratio signal.
-
-## 5. Sector percentile rank
-
-Continuous features are compared within the same Bloomberg sector.
-
-For stock `i`:
-
-```text
-PR(x_i) = (# values below x_i + 0.5 x # values equal to x_i) / N
-```
-
-The result lies between 0 and 1.
-
-- `0.90` means the stock is above about 90% of stocks in the same sector.
-- `0.50` is a neutral sector position.
-- Missing feature values receive `0.50` by default.
-
-## 6. Screen A
-
-Screen A looks for stocks that are already strong and continue to receive positive confirmation.
-
-### 6.1 Three-month momentum
-
-```text
-M3_i = sector percentile of Return 3M
-```
-
-### 6.2 Five-day continuation
-
-```text
-M5_i = sector percentile of Return 5D
-```
-
-### 6.3 EPS revision
-
-The model does not use the workbook's existing EPS-change column. It calculates a symmetric revision:
-
-```text
-EPSRevision_i =
-    (EPSNow_i - EPS30d_i)
-    / (abs(EPSNow_i) + abs(EPS30d_i) + epsilon)
-```
-
-This is more stable when EPS is negative or close to zero.
-
-```text
-E_i = sector percentile of EPSRevision_i
-```
-
-### 6.4 Volume ratio
-
-```text
-VolumeRatio_i = AverageVolume5D_i / AverageVolume20D_i
-```
-
-```text
-VR_i = sector percentile of VolumeRatio_i
-```
-
-### 6.5 Moving-average confirmation
-
-```text
-MA20_i = average of t-0 through t-19
-D20_i  = LatestPrice_i / MA20_i - 1
-
-MA50_i = average of t-0 through t-49
-D50_i  = LatestPrice_i / MA50_i - 1
-```
-
-The model then calculates sector percentile ranks for `D20` and `D50`.
-
-### 6.6 Price confirmation
-
-```text
-PriceConfirmationA_i =
-    0.40 x PR(D20_i)
-  + 0.30 x PR(D50_i)
-  + 0.30 x PR(VolumeRatio_i)
-```
-
-### 6.7 Final Screen A score
-
-```text
-ScreenAScore_i =
-    0.40 x PR(Return3M_i)
-  + 0.25 x PR(EPSRevision_i)
-  + 0.25 x PriceConfirmationA_i
-  + 0.10 x PR(Return5D_i)
-```
-
-Screen A tie-breakers are:
-
-1. Screen A score
-2. 3-month momentum percentile
-3. EPS-revision percentile
-4. 20-day average daily value traded
-5. Ticker
-
-## 7. Screen B
-
-Screen B looks for stocks that may make a large move during the competition period.
-
-### 7.1 Business days to earnings
-
-The program counts Monday-Friday business days from the model as-of date to the next earnings date. Local exchange holidays are not modeled separately.
-
-### 7.2 Catalyst score
-
-```text
-0-5 business days:   1.00
-6-10 business days:  0.75
-11-15 business days: 0.50
-Otherwise:           0.00
-```
-
-A catalyst score only says that an event is close. It does not say that the event will be positive.
-
-### 7.3 Volatility rank
-
-```text
-VolRank_i = sector percentile of Bloomberg Vol 20D
-```
-
-### 7.4 Final Screen B score
-
-```text
-ScreenBScore_i =
-    0.35 x CatalystScore_i
-  + 0.30 x PR(Vol20D_i)
-  + 0.20 x PR(Return5D_i)
-  + 0.15 x PR(VolumeRatio_i)
-```
-
-Screen B tie-breakers are:
-
-1. Screen B score
-2. Catalyst score
-3. 20-day volatility percentile
-4. 5-day return percentile
-5. 20-day average daily value traded
-6. Ticker
-
-## 8. Optional filter flag
-
-The program calculates the following flag:
-
-```text
-Price >= USD 2
-Market capitalization >= USD 300 million
-ADV20 >= USD 5 million
-```
-
-This flag is diagnostic only. It does **not** remove stocks or change their rank.
-
-## 9. Output files
-
-A standard run creates:
-
-```text
-WLS_Screen_A_B_Rankings.xlsx
-WLS_All_Rankings.csv
-WLS_Screen_A_Top20.csv
-WLS_Screen_B_Top20.csv
-WLS_Run_Metadata.json
-```
-
-The Excel report contains:
-
-- `Screen A Top`
-- `Screen B Top`
-- `All Rankings`
-- `Methodology`
-- `Data Quality`
-- `Controls`
-
-## 10. Important limitations
-
-- The model uses a simple earnings-date catalyst, not a full qualitative event analysis.
-- Screen B should be refreshed frequently because earnings dates and short-term prices change.
-- A high ranking is a watchlist signal, not an automatic trade instruction.
-- Sector percentile ranks control broad sector differences, but they do not neutralize country, currency, beta, or industry exposure.
-- The current model does not use options data, short interest, guidance, news sentiment, or historical earnings gaps.
-
-## 11. Tests
-
-Install development dependencies and run:
+The replay writes `filter_audit.csv`, `eligible_scored.csv`, `top20_A.csv`,
+`top20_B.csv`, `targets_A3_B2.csv`, `exchange_calendar_inference.csv`, and
+`summary.json`. The October 14 workbook's FY1-incompatible BF12M EPS field
+is not mixed into the older FY1 series. Complete comparable EPS and 5/20
+share-volume observations stop at October 7, and October 8–9 share volumes
+were not supplied. This selection is therefore **indicative**, not a
+fully refreshed October 13 signal. See the warnings in `summary.json`.
+
+## Historical daily scenario
+
+The standalone historical runner performs a daily A3/B2 next-close replay
+on dated price, EPS, and volume panels. A filter cohort supplied to this
+runner is an **October snapshot applied retrospectively** because daily
+historical USD market caps and 20-day USD traded values were not provided.
+It is not a point-in-time implementation of the first layer. A sector CSV
+must have `Ticker,Sector` columns. Supply either a verified `Ticker` cohort
+or a snapshot CSV containing `Ticker,PriceD1USD,ADV20USD,MarketCapUSD`;
+the latter applies the strict gates to that snapshot.
 
 ```bash
-pip install -e ".[dev]"
-pytest
+python research/historical_backtest.py \
+  --prices /path/to/WLS_as_of_Oct_08_and_Prices_100d.xlsx \
+  --eps-volume /path/to/EPS_and_Turnover.xlsx \
+  --sectors /path/to/ticker_sector.csv \
+  --filter-snapshot /path/to/snapshot_filter_fields.csv \
+  --snapshot-date 2026-10-08 \
+  --first-signal 2026-09-07 \
+  --final-mark 2026-10-07 \
+  --output-dir outputs/backtest
 ```
+
+Outputs are `summary.json`, `daily.csv`, `holdings.csv`, `trades.csv`, and
+`wls_snapshot_proxy_daily.csv`. The supplied data supported a retrospective
+full-universe result of −5.86% and a 4,957-name mapped-cohort result of
++14.06% under the same engine. Those figures are **gross local-price
+scenarios**, with October membership, sector, eligibility, and expected
+earnings dates projected backward. The WLS comparison is a
+constituent-weighted *proxy*, not an official WLS index return. To reproduce
+the prior October 10 WLS-weight proxy, also pass an optional full-universe
+`--wls-weights-snapshot` CSV. See the
+[historical runner input contract](research/README.md) and
+[result caveats](docs/backtest_2026.md).
+
+## Check the code
+
+```bash
+pytest -q
+```
+
+Do not commit licensed Bloomberg exports, account holdings, or output files
+to the public repository.

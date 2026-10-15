@@ -83,7 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     LOGGER.info(
-        "Loaded %s stocks across %s sectors. Model as-of date: %s",
+        "WLS input %s; three-gate pass %s; scored with GICS sector %s across %s sectors. "
+        "Model as-of date: %s",
+        f"{len(result.filter_audit):,}",
+        f"{result.quality_summary['eligible_universe_size']:,}",
         f"{len(result.all_rankings):,}",
         result.quality_summary["sector_count"],
         result.as_of_date.strftime("%Y-%m-%d"),
@@ -104,6 +107,13 @@ def main(argv: list[str] | None = None) -> int:
 
     LOGGER.info("Screen A top ticker: %s", result.screen_a_top.iloc[0]["Ticker"])
     LOGGER.info("Screen B top ticker: %s", result.screen_b_top.iloc[0]["Ticker"])
+    LOGGER.info(
+        "Portfolio targets: %s",
+        ", ".join(
+            f"{row.Sleeve}:{row.Ticker} {row.TargetWeight:.0%}"
+            for row in result.portfolio_targets.itertuples(index=False)
+        ),
+    )
     return 0
 
 

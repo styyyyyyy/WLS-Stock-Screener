@@ -77,6 +77,50 @@ def rank_screens(
     return frame, top_a, top_b
 
 
+def select_targets(
+    rankings: pd.DataFrame,
+    *,
+    config: ScreenerConfig,
+) -> pd.DataFrame:
+    """Select three A names, then the two best distinct B names by default.
+
+    Selection uses the full eligible ranking, not just a possibly shortened
+    Top-N presentation table. A Screen B name already selected by Screen A is
+    skipped, rather than double-weighted.
+    """
+
+    target_count = config.target_a_count + config.target_b_count
+    if len(rankings) < target_count:
+        raise ValueError(
+            f"Cannot fill {target_count} distinct positions from "
+            f"{len(rankings)} eligible WLS names."
+        )
+
+    selected_a = rankings.nsmallest(config.target_a_count, "ScreenARank").copy()
+    selected_b = (
+        rankings.loc[~rankings["Ticker"].isin(selected_a["Ticker"])]
+        .nsmallest(config.target_b_count, "ScreenBRank")
+        .copy()
+    )
+
+    selected_a["Sleeve"] = "A"
+    selected_b["Sleeve"] = "B"
+    selected_a["SleeveRank"] = np.arange(1, len(selected_a) + 1, dtype=int)
+    selected_b["SleeveRank"] = np.arange(1, len(selected_b) + 1, dtype=int)
+    selected_a["SelectionRank"] = selected_a["ScreenARank"]
+    selected_b["SelectionRank"] = selected_b["ScreenBRank"]
+    selected_a["SelectionScore"] = selected_a["ScreenAScore"]
+    selected_b["SelectionScore"] = selected_b["ScreenBScore"]
+    targets = pd.concat([selected_a, selected_b], ignore_index=True)
+    targets["TargetWeight"] = config.target_weight
+
+    if targets["Ticker"].duplicated().any():
+        raise ValueError("Portfolio targets must have distinct tickers.")
+    if abs(float(targets["TargetWeight"].sum()) - 1.0) > 1e-9:
+        raise ValueError("Portfolio target weights must sum to 100%.")
+    return targets
+
+
 def validate_rankings(frame: pd.DataFrame) -> None:
     """Perform internal consistency checks before exporting results."""
 

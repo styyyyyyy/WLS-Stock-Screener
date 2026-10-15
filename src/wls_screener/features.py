@@ -2,12 +2,73 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import numpy as np
 import pandas as pd
 
 from .config import ScreenerConfig
+
+
+def build_filter_audit(main: pd.DataFrame, config: ScreenerConfig) -> pd.DataFrame:
+    """Audit the strict Bloomberg WLS investability gates for every input name.
+
+    The input ``Main`` sheet is assumed to be the point-in-time WLS universe.
+    All three numeric gates are strict; a missing or nonfinite value fails.
+    The three-gate pass count is kept separate from the number with a usable
+    GICS sector. Ranking uses ``PassesScoringUniverse``, so no synthetic
+    ``Unknown`` sector enters a percentile denominator.
+    """
+
+    columns = [
+        "Ticker", "Name", "Sector", "Country", "PriceUSD", "ADV20USD", "MarketCapUSD"
+    ]
+    audit = main.loc[:, columns].copy()
+
+    for source, output, threshold in (
+        ("PriceUSD", "PassPriceUSD", config.min_price_usd),
+        ("ADV20USD", "PassADV20USD", config.min_adv20_usd),
+        ("MarketCapUSD", "PassMarketCapUSD", config.min_market_cap_usd),
+    ):
+        values = pd.to_numeric(audit[source], errors="coerce").astype(float)
+        audit[output] = values.gt(threshold) & np.isfinite(values)
+
+    audit["PassPriceAndADV"] = audit["PassPriceUSD"] & audit["PassADV20USD"]
+    audit["PassesUniverseFilter"] = (
+        audit["PassPriceAndADV"] & audit["PassMarketCapUSD"]
+    )
+
+    sector_text = audit["Sector"].astype("string").str.strip().str.lower()
+    invalid_sectors = {"", "--", "unknown", "n/a", "na", "none", "null", "nan"}
+    audit["PassGICSSector"] = sector_text.notna() & ~sector_text.isin(invalid_sectors)
+    audit["PassesScoringUniverse"] = (
+        audit["PassesUniverseFilter"] & audit["PassGICSSector"]
+    )
+
+    flags = ("PassPriceUSD", "PassADV20USD", "PassMarketCapUSD", "PassGICSSector")
+    labels = ("price_usd", "adv20_usd", "market_cap_usd", "gics_sector")
+    audit["FilterFailureReasons"] = [
+        ";".join(label for flag, label in zip(flags, labels) if not row[flag])
+        for _, row in audit[list(flags)].iterrows()
+    ]
+    return audit
+
+
+def build_filter_counts(audit: pd.DataFrame) -> dict[str, int]:
+    """Return stage counts for the 10k-to-5k universe reduction."""
+
+    return {
+        "input_wls_universe_size": int(len(audit)),
+        "pass_price_usd_count": int(audit["PassPriceUSD"].sum()),
+        "pass_price_and_adv20_usd_count": int(audit["PassPriceAndADV"].sum()),
+        "eligible_universe_size": int(audit["PassesUniverseFilter"].sum()),
+        "eligible_with_valid_gics_sector": int(audit["PassesScoringUniverse"].sum()),
+        "eligible_without_gics_sector": int(
+            (audit["PassesUniverseFilter"] & ~audit["PassGICSSector"]).sum()
+        ),
+        "scored_universe_size": int(audit["PassesScoringUniverse"].sum()),
+        "fail_price_usd_count": int((~audit["PassPriceUSD"]).sum()),
+        "fail_adv20_usd_count": int((~audit["PassADV20USD"]).sum()),
+        "fail_market_cap_usd_count": int((~audit["PassMarketCapUSD"]).sum()),
+    }
 
 
 def mid_percentile(
@@ -129,6 +190,10 @@ def compute_features(
     """Create all raw and ranked features used by both screens."""
 
     config.validate()
+    if not build_filter_audit(main, config)["PassesScoringUniverse"].all():
+        raise ValueError(
+            "compute_features requires a prefiltered WLS universe with valid GICS sectors."
+        )
     frame = main.copy()
 
     # ------------------------------------------------------------------
@@ -193,12 +258,10 @@ def compute_features(
     denominator = frame["EPSNow"].abs() + frame["EPS30d"].abs() + 1e-12
     frame["EPSRevision"] = (frame["EPSNow"] - frame["EPS30d"]) / denominator
 
-    # Optional filter is a diagnostic only. It never changes a stock's rank.
-    frame["PassesOptionalFilter"] = (
-        frame["PriceUSD"].ge(config.optional_min_price_usd)
-        & frame["MarketCapUSD"].ge(config.optional_min_market_cap_usd)
-        & frame["ADV20USD"].ge(config.optional_min_adv20_usd)
-    )
+    # The pipeline applies the numeric and GICS-sector gates first, so the
+    # percentile denominator contains scored names only.
+    frame["PassesUniverseFilter"] = True
+    frame["PassesScoringUniverse"] = True
 
     # ------------------------------------------------------------------
     # Within-sector percentile ranks
@@ -264,7 +327,6 @@ def build_quality_summary(frame: pd.DataFrame) -> dict[str, object]:
         "missing_ma20": int(frame["DistanceMA20"].isna().sum()),
         "missing_ma50": int(frame["DistanceMA50"].isna().sum()),
         "missing_volatility_20d": int(frame["Vol20D"].isna().sum()),
-        "optional_filter_pass_count": int(frame["PassesOptionalFilter"].sum()),
         "events_0_to_5_business_days": int(frame["DaysToEarnings"].between(0, 5).sum()),
         "events_6_to_10_business_days": int(frame["DaysToEarnings"].between(6, 10).sum()),
         "events_11_to_15_business_days": int(frame["DaysToEarnings"].between(11, 15).sum()),

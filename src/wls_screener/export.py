@@ -46,7 +46,7 @@ TOP_A_COLUMNS = [
     "RankReturn5D",
     "NextEarningDate",
     "ADV20USD",
-    "PassesOptionalFilter",
+    "PassesUniverseFilter",
 ]
 
 TOP_B_COLUMNS = [
@@ -68,7 +68,7 @@ TOP_B_COLUMNS = [
     "Return3M",
     "ScreenARank",
     "ADV20USD",
-    "PassesOptionalFilter",
+    "PassesUniverseFilter",
 ]
 
 ALL_COLUMNS = [
@@ -110,7 +110,26 @@ ALL_COLUMNS = [
     "ScreenBScore",
     "TurnoverRatio5D20D",
     "PriceHistoryCount",
-    "PassesOptionalFilter",
+    "PassesUniverseFilter",
+    "PassesScoringUniverse",
+]
+
+TARGET_COLUMNS = [
+    "Sleeve",
+    "SleeveRank",
+    "Ticker",
+    "Name",
+    "Sector",
+    "Country",
+    "SelectionRank",
+    "SelectionScore",
+    "TargetWeight",
+    "ScreenARank",
+    "ScreenBRank",
+    "NextEarningDate",
+    "PriceUSD",
+    "ADV20USD",
+    "MarketCapUSD",
 ]
 
 DISPLAY_NAMES = {
@@ -147,7 +166,13 @@ DISPLAY_NAMES = {
     "ScreenBScore": "Screen B Score",
     "TurnoverRatio5D20D": "Turnover Ratio 5D/20D",
     "PriceHistoryCount": "Price Observations",
-    "PassesOptionalFilter": "Optional Filter Flag",
+    "PassesUniverseFilter": "Passes Universe Filter",
+    "PassesScoringUniverse": "Passes Scoring Universe",
+    "Sleeve": "Screen",
+    "SleeveRank": "Screen Selection Order",
+    "SelectionRank": "Source Screen Rank",
+    "SelectionScore": "Source Screen Score",
+    "TargetWeight": "Target Weight",
 }
 
 
@@ -161,8 +186,20 @@ def _methodology_table(result: ScreeningResult) -> pd.DataFrame:
     rows = [
         (
             "Universe",
-            "All valid tickers in the Main sheet",
-            "No early economic filter is applied to either ranking.",
+            "Point-in-time Bloomberg WLS constituents in the Main sheet",
+            "Input WLS membership must be correct as of the model date.",
+        ),
+        (
+            "Strict investability gate",
+            f"Price USD > ${config.min_price_usd:g}; "
+            f"ADV20 USD > ${config.min_adv20_usd / 1e6:g}m; "
+            f"market cap USD > ${config.min_market_cap_usd / 1e6:g}m",
+            "All three numeric gates are strict; missing values fail.",
+        ),
+        (
+            "GICS sector availability",
+            "A nonblank GICS sector is required after the three numeric gates",
+            "Unknown, --, and blank sectors stay in the audit but are not scored.",
         ),
         (
             "Sector percentile",
@@ -243,11 +280,10 @@ def _methodology_table(result: ScreeningResult) -> pd.DataFrame:
             "Event-volatility ranking.",
         ),
         (
-            "Optional diagnostic filter",
-            f"Price >= ${config.optional_min_price_usd:g}; "
-            f"market cap >= ${config.optional_min_market_cap_usd / 1e6:g}m; "
-            f"ADV20 >= ${config.optional_min_adv20_usd / 1e6:g}m",
-            "Displayed as a flag only; it never changes the rankings.",
+            "Portfolio targets",
+            f"Top {config.target_a_count} Screen A, then top {config.target_b_count} "
+            f"distinct Screen B names; {config.target_weight:.0%} per stock",
+            "Screen B skips any ticker already selected by Screen A.",
         ),
     ]
     return pd.DataFrame(rows, columns=["Item", "Definition", "Use / Comment"])
@@ -329,7 +365,9 @@ def _format_workbook(path: Path, source_name: str) -> None:
             )
 
     # Number formats for all sheets that contain rankings.
-    for sheet_name in ["Screen A Top", "Screen B Top", "All Rankings"]:
+    for sheet_name in [
+        "Portfolio Targets", "Screen A Top", "Screen B Top", "All Rankings", "Filter Audit"
+    ]:
         sheet = workbook[sheet_name]
         header_map = {cell.value: cell.column for cell in sheet[1]}
 
@@ -355,8 +393,10 @@ def _format_workbook(path: Path, source_name: str) -> None:
         ]:
             set_format(header, "0.0%")
 
-        for header in ["Screen A Score", "Screen B Score", "Catalyst Score"]:
+        for header in ["Screen A Score", "Screen B Score", "Catalyst Score", "Source Screen Score"]:
             set_format(header, "0.0000")
+
+        set_format("Target Weight", "0.0%")
 
         for header in ["Volume Ratio 5D/20D", "Turnover Ratio 5D/20D"]:
             set_format(header, "0.00x")
@@ -398,6 +438,8 @@ def export_results(
     paths = {
         "excel": destination / f"{prefix}_Screen_A_B_Rankings.xlsx",
         "all_csv": destination / f"{prefix}_All_Rankings.csv",
+        "filter_audit_csv": destination / f"{prefix}_Filter_Audit.csv",
+        "targets_csv": destination / f"{prefix}_Portfolio_Targets.csv",
         "screen_a_csv": destination / f"{prefix}_Screen_A_Top{result.config.top_n}.csv",
         "screen_b_csv": destination / f"{prefix}_Screen_B_Top{result.config.top_n}.csv",
         "metadata_json": destination / f"{prefix}_Run_Metadata.json",
@@ -405,6 +447,8 @@ def export_results(
 
     # CSVs retain machine-readable column names.
     result.all_rankings.sort_values("ScreenARank").to_csv(paths["all_csv"], index=False)
+    result.filter_audit.to_csv(paths["filter_audit_csv"], index=False)
+    result.portfolio_targets.to_csv(paths["targets_csv"], index=False)
     result.screen_a_top.sort_values("ScreenARank").to_csv(paths["screen_a_csv"], index=False)
     result.screen_b_top.sort_values("ScreenBRank").to_csv(paths["screen_b_csv"], index=False)
 
@@ -413,6 +457,9 @@ def export_results(
         "input_path": str(result.input_path),
         "config": asdict(result.config),
         "quality_summary": result.quality_summary,
+        "portfolio_targets": result.portfolio_targets[
+            ["Sleeve", "Ticker", "SelectionRank", "SelectionScore", "TargetWeight"]
+        ].to_dict(orient="records"),
     }
     with paths["metadata_json"].open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, ensure_ascii=False, default=str)
@@ -429,11 +476,18 @@ def export_results(
         result.all_rankings.sort_values("ScreenARank"),
         ALL_COLUMNS,
     )
+    targets = _select_and_rename(result.portfolio_targets, TARGET_COLUMNS)
+    filter_audit = _select_and_rename(
+        result.filter_audit,
+        list(result.filter_audit.columns),
+    )
 
     with pd.ExcelWriter(paths["excel"], engine="openpyxl") as writer:
+        targets.to_excel(writer, sheet_name="Portfolio Targets", index=False)
         top_a.to_excel(writer, sheet_name="Screen A Top", index=False)
         top_b.to_excel(writer, sheet_name="Screen B Top", index=False)
         all_rankings.to_excel(writer, sheet_name="All Rankings", index=False)
+        filter_audit.to_excel(writer, sheet_name="Filter Audit", index=False)
         _methodology_table(result).to_excel(writer, sheet_name="Methodology", index=False)
         _quality_table(result).to_excel(writer, sheet_name="Data Quality", index=False)
         _controls_table(result).to_excel(writer, sheet_name="Controls", index=False)
